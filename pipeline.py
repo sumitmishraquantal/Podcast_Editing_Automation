@@ -16,11 +16,31 @@ FIXES applied:
 """
 import argparse, json, os, random, re, subprocess, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+
+def _load_env():
+    env_file = HERE / ".env"
+    if not env_file.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_file)
+    except ImportError:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip("\"'"))
+
+
+_load_env()
 import reel_captions as rc
 
 STAGES = ["merge", "transcribe", "sound", "effects", "captions", "finalize"]
-HERE   = Path(__file__).resolve().parent
 PRESET = "veryfast" if os.environ.get("REEL_FAST") else "medium"
 VW, VH, FPS = 1080, 1920, 30
 
