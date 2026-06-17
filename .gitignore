@@ -1,5 +1,16 @@
-_pycache_/
+# Python
 __pycache__/
+*.pyc
 
+# Secrets
 .env
-project/
+
+# Virtual environment
+.venv/
+
+# Local data — never commit footage or renders
+projects/
+delivered/
+
+# Diagnostic scratch
+diag_whoosh.py

@@ -1,168 +1,192 @@
 # Reel Studio — Automated Podcast Reel Pipeline
 
-Turns raw podcast clips into a finished, vertical Instagram reel: merges clips,
-transcribes speech, scores it with mood-matched background music and transition
-SFX, adds subtle motion, burns kinetic captions, and delivers a spec-compliant
-`final.mp4` — with an objective QC pass at the end.
+Turns raw podcast clips into finished vertical Instagram reels — fully automated,
+from Google Drive ingest to delivered output. Fetches clips from Drive, merges,
+transcribes, scores with mood-matched music + transition SFX, adds motion, burns
+kinetic captions, runs objective QC, and archives the result back to Drive and
+locally — with no manual steps once clips are uploaded.
 
 Output spec: **1080×1920, 30 fps, −14 LUFS, true peak ≤ −1 dBTP, H.264/AAC MP4.**
 
 ---
 
-## How it works
+## The automated flow
 
-The pipeline runs in six ordered stages. Each stage reads the previous stage's
-output, so order matters.
+```
+Google Drive inbox  →  fetch  →  merge → transcribe → sound → effects → captions → finalize  →  QC  →  archive
+   (you upload clips)                    (6-stage pipeline)                              (gate)   (Drive + local)
+```
 
-| # | Stage | What it does | Output |
-|---|-------|--------------|--------|
-| 1 | `merge` | Conforms every raw clip to 1080×1920/30fps, loudness-matches each to −14 LUFS, trims edge silence, concatenates into one reel | `01_merged.mp4`, `cuts.json` |
-| 2 | `transcribe` | ElevenLabs Scribe → word-level timestamps (caption + zoom source) | `words.json` |
-| 3 | `sound` | Detects mood from transcript, generates a ducked music bed + a whoosh on each seam, normalizes to −14 LUFS | `03_scored.m4a` |
-| 4 | `effects` | Subtle Ken-Burns push, zoom punch on up to 4 impact words, soft blur on each seam | `04_effects.mp4` |
-| 5 | `captions` | Burns kinetic captions LAST (1–2 words at a time, never overlapping) onto the effects video | `05_captioned.mp4` |
-| 6 | `finalize` | Delivery encode: CRF 19, faststart, final loudness pass | `final.mp4` |
+One command runs the whole thing for every client:
 
-A separate `qc_check.py` then measures the result and writes `REVIEW.md`.
+```bash
+python run_all.py
+```
+
+This is what the scheduled Routine (or a cron job) calls.
+
+---
+
+## How the pieces fit
+
+| Script | Role |
+|--------|------|
+| `run_all.py` | Entry point. Finds every Drive client with clips waiting, runs `run_client.py` for each, prints a summary. |
+| `run_client.py` | One client end-to-end: fetch → pipeline → QC → self-correct → archive (only if QC passes). |
+| `rclone_sync.py` | Google Drive sync: `fetch` (download inbox), `archive` (move clips to done/, upload reel). |
+| `pipeline.py` | The 6-stage video pipeline (merge, transcribe, sound, effects, captions, finalize). |
+| `reel_captions.py` | Caption rendering + audio engine (imported by pipeline). |
+| `merge_reel.py` | Clip conform + merge (called by the merge stage). |
+| `qc_check.py` | Objective QC → writes `REVIEW.md`. |
+
+### The 6 pipeline stages
+
+| Stage | Does | Output |
+|-------|------|--------|
+| merge | Conforms clips to 1080×1920/30fps, loudness-matches, trims silence, concatenates | `01_merged.mp4`, `cuts.json` |
+| transcribe | ElevenLabs Scribe → word-level timestamps | `words.json` |
+| sound | Mood-matched music bed (ducked) + whoosh on each seam | `03_scored.m4a` |
+| effects | Subtle Ken-Burns, zoom punch on up to 4 impact words, soft seam blur | `04_effects.mp4` |
+| captions | Kinetic captions burned LAST (1–2 words, no overlap) | `05_captioned.mp4` |
+| finalize | Delivery encode (CRF 19, faststart, final loudness pass) | `final.mp4` |
 
 ---
 
 ## Prerequisites
 
-Install these on any machine before first use:
-
 | Tool | Windows | macOS |
 |------|---------|-------|
-| **Python 3.10+** | [python.org](https://python.org) | `brew install python` |
-| **ffmpeg** (with ffprobe) | `winget install ffmpeg` | `brew install ffmpeg` |
-| **Git** | [git-scm.com](https://git-scm.com) | `brew install git` |
-
-Verify they're on your PATH:
-
-```bash
-python --version
-ffmpeg -version
-ffprobe -version
-```
+| Python 3.10+ | python.org | `brew install python` |
+| ffmpeg (+ffprobe) | `winget install ffmpeg` | `brew install ffmpeg` |
+| rclone | `winget install Rclone.Rclone` | `brew install rclone` |
+| Git | git-scm.com | `brew install git` |
 
 ---
 
 ## Setup (one time)
 
 ```bash
-# 1. Clone
 git clone https://github.com/YOUR_ORG/reel-studio.git
 cd reel-studio
-
-# 2. Install Python dependencies
 pip install -r requirements.txt
-
-# 3. Set your ElevenLabs API key (needed for transcribe + sound stages)
 ```
 
-**Windows (PowerShell):**
+Set the ElevenLabs key (transcribe + sound need it):
+
 ```powershell
+# Windows
 setx ELEVENLABS_API_KEY "your_key_here"
-# close and reopen the terminal, then confirm:
-echo $env:ELEVENLABS_API_KEY
 ```
-
-**macOS / Linux:**
 ```bash
+# macOS / Linux
 export ELEVENLABS_API_KEY="your_key_here"
-# add the line above to ~/.zshrc or ~/.bashrc to persist it
 ```
 
-Get the key from your ElevenLabs account → Profile → API Keys.
+### Connect Google Drive (rclone)
+
+One-time interactive auth. Run `rclone config` and create a remote **named exactly `gdrive`**:
+
+```
+n) new remote → name: gdrive → storage: drive → scope: 1 (full)
+leave client_id/secret blank → auto config: y → log in via browser
+configure as team drive: n (unless using a Shared Drive)
+```
+
+Verify it works:
+
+```bash
+rclone lsd gdrive:reel-projects
+```
+
+> **rclone discovery:** the scripts auto-find rclone even if it isn't on PATH
+> (they check winget/scoop/choco/standard install locations). If rclone lives
+> somewhere unusual, set `RCLONE_EXE` to its full path. This matters because
+> scheduled runners (the Routine, cron) don't always inherit your PATH.
 
 ---
 
-## Project structure
-
-Each reel is one "project" folder. Clips always go in a subfolder named exactly
-`raw`. The pipeline writes everything else into `edit/`.
+## Google Drive structure
 
 ```
-reel-studio/
-├── pipeline.py            # orchestrator
-├── reel_captions.py       # captions + audio engine
-├── merge_reel.py          # clip conform + merge
-├── qc_check.py            # objective QC → REVIEW.md
-├── fonts/                 # caption fonts (8 .ttf)
-├── requirements.txt
-├── README.md
-└── projects/              # ← git-ignored; your footage lives here
-    └── <PROJECT_NAME>/
-        ├── raw/           # ← put .mp4 / .mov clips here (never modified)
-        └── edit/          # ← all pipeline output (safe to delete & regenerate)
-            └── final.mp4
+reel-projects/                 ← the root the scripts watch
+└── <CLIENT_NAME>/             ← one folder per client
+    ├── clip1.mp4              ← INBOX: upload new clips here
+    ├── clip2.mp4
+    └── done/                  ← archive (scripts manage this — don't touch)
+        ├── Videos/
+        │   └── Video_<timestamp>/   ← raw clips, moved here after a successful run
+        └── Processed_Video/
+            └── Processed_<timestamp>.mp4   ← finished reel
 ```
 
-> **Note:** `projects/` is git-ignored — raw footage and renders never get
-> committed. Only the code, fonts, and docs are tracked.
+**To add work:** upload clips into a client's top-level folder on Drive. That's it.
+Drive is the single source of truth for inputs — never drop clips in the local
+`raw/` folder, as it is wiped and re-mirrored from Drive on every run.
+
+After a successful run, the raw clips **move** into `done/Videos/Video_<timestamp>/`
+(nothing is deleted), and the reel lands in both `done/Processed_Video/` on Drive
+and `delivered/<CLIENT>/` locally. The shared timestamp links each raw set to the
+reel it produced.
 
 ---
 
 ## Usage
 
-Add a project, then run all six stages in one pass:
-
 ```bash
-# create a project and add clips
-mkdir -p projects/MY_REEL/raw
-# copy your .mp4 / .mov files into projects/MY_REEL/raw/
+# Process every client with clips waiting (what the Routine runs):
+python run_all.py
 
-# run the whole pipeline
-python pipeline.py projects/MY_REEL --all
+# Process one specific client:
+python run_client.py <CLIENT>
 
-# objective QC
-python qc_check.py projects/MY_REEL
+# Lower-level, if needed:
+python rclone_sync.py list                # show Drive clients
+python rclone_sync.py fetch <CLIENT>       # download inbox -> local raw/
+python pipeline.py projects/<CLIENT> --all # run the 6 stages locally
+python qc_check.py projects/<CLIENT>       # objective QC -> REVIEW.md
+python rclone_sync.py archive <CLIENT>     # archive (only after a good run)
 ```
-
-Result: `projects/MY_REEL/edit/final.mp4` plus `REVIEW.md`.
-
-### Running one stage at a time
-
-Useful for debugging or re-running just one step:
-
-```bash
-python pipeline.py projects/MY_REEL --stage merge
-python pipeline.py projects/MY_REEL --stage transcribe
-python pipeline.py projects/MY_REEL --stage sound
-python pipeline.py projects/MY_REEL --stage effects
-python pipeline.py projects/MY_REEL --stage captions
-python pipeline.py projects/MY_REEL --stage finalize
-```
-
-> Stages depend on earlier outputs. If you re-run `effects`, also re-run
-> `captions` and `finalize` afterward, since they build on top of it.
-
-`--restart` wipes the saved stage state and starts the project clean.
 
 ---
 
-## Quality control & what gets auto-checked
+## Quality control
 
-`qc_check.py` writes `REVIEW.md` with a verdict (`SHIPPABLE` / `BLOCKED`) and two
-kinds of findings.
+`qc_check.py` writes `REVIEW.md` with a verdict and findings.
 
-**Objective (measured, pass/fail):**
-- Duration 12–90 s
-- Loudness within −16…−12 LUFS
-- True peak ≤ −0.5 dBTP
-- No black frames
-- No overlapping captions
-- Caption tags well-formed
-- Music bed audible
+**Objective (pass/fail — block delivery if failed):** duration 12–90s, loudness
+−16…−12 LUFS, true peak ≤ −0.5 dBTP, no black frames, no caption overlap,
+caption tags well-formed, music bed audible.
 
-**Subjective (flagged for a human — the tool cannot see or hear video):**
-- Whether music/SFX fit the mood
-- Whether transitions and motion look good
-- Whether the right words are emphasised
-- Overall caption taste
+**Flags (reported, do NOT block):** whoosh seam levels, and anything subjective —
+music/SFX feel, transition look, caption taste. These are for a human to review.
 
-> Always watch `final.mp4` yourself before publishing. QC catches measurable
-> defects, not aesthetic ones.
+### Delivery gate (strict)
+
+`run_client.py` archives **only if QC passes** (`SHIPPABLE`). If objective checks
+fail, it self-corrects (re-runs the relevant stage, max 2 attempts), and if still
+failing, it does **not** deliver — the clips stay in the Drive inbox to retry on
+the next run. A flawed reel never reaches the client.
+
+> Always watch delivered reels for the subjective flags before publishing —
+> QC catches measurable defects, not aesthetic ones.
+
+---
+
+## Scheduled / autonomous runs
+
+Because everything is plain Python + ffmpeg + rclone, it runs unattended:
+
+```bash
+# cron: every night, process whatever is waiting on Drive
+0 2 * * * cd /path/to/reel-studio && python run_all.py
+```
+
+External runtime dependencies: the ElevenLabs API key and rclone Drive auth.
+
+> **Headless note:** scheduled runners don't inherit your interactive shell's
+> PATH/env. The scripts auto-discover rclone, but ensure `ELEVENLABS_API_KEY` is
+> set machine-wide (or in the job's environment) and that the Python used has
+> `requests` installed.
 
 ---
 
@@ -170,29 +194,16 @@ kinds of findings.
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `No clips in ...\raw` | Wrong path, or clips not in a `raw` subfolder | Pass the full project path; ensure clips are in `projects/<NAME>/raw/` |
-| transcribe/sound fails immediately | `ELEVENLABS_API_KEY` not set in this terminal | Set it, then **open a new terminal** |
-| Final video has no motion | `effects` stage was skipped | Run `effects` before `captions` |
-| Captions look like a plain default font | Font internal name mismatch / fonts not found | Confirm the `fonts/` folder is present; pass `--fontsdir` if needed |
-| ffmpeg/ffprobe "not recognized" | Not on PATH | Reinstall ffmpeg and reopen the terminal |
+| `rclone is not installed or not on PATH` | Runner can't see rclone | Scripts auto-discover it; if not, set `RCLONE_EXE` to the full path |
+| `No module named requests` | Wrong Python / venv not active | `pip install requests` for the Python the runner uses |
+| transcribe/sound fail immediately | `ELEVENLABS_API_KEY` not set | Set it; reopen the terminal |
+| `can't sync or move files on overlapping remotes` | (fixed) archive moved a dir into itself | Already handled via per-file moveto |
+| Client skipped, "inbox empty" | All clips already archived to done/ | Upload new clips to the client's Drive folder |
+| Final video has no motion | effects stage skipped | Use `--all` or `run_client.py`, not partial stages |
 
 ---
 
 ## What's intentionally out of scope
 
-Intro cards, separate thumbnails, and extra caption color variants are **not**
-part of the current pipeline. They're future add-ons.
-
----
-
-## Deploying for automated / scheduled runs
-
-Because the pipeline is plain Python + ffmpeg, it can run unattended (e.g. a cron
-job on a VPS) with no interactive tooling:
-
-```bash
-# nightly: process any project that has clips
-0 2 * * * cd /path/to/reel-studio && python pipeline.py projects/CLIENT --all && python qc_check.py projects/CLIENT
-```
-
-The only external runtime dependency is the ElevenLabs API key.
+Intro cards, separate thumbnails, extra caption color variants — future add-ons,
+not part of the current pipeline.
