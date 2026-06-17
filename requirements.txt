@@ -1,0 +1,9 @@
+# ── reel-studio Python dependencies ───────────────────────────────────────────
+# Install with:  pip install -r requirements.txt
+#
+# The video pipeline itself depends on exactly ONE third-party package:
+requests>=2.31.0          # ElevenLabs API calls (transcribe + sound stages)
+
+# ── Optional: only needed to run the font diagnostic helper (check_fonts.py) ──
+# Safe to leave installed; not used by the pipeline at runtime.
+fonttools>=4.50.0
