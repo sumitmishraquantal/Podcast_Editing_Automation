@@ -20,6 +20,11 @@ FIXES:
 import argparse, json, os, re, subprocess, sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dotenv_util
+
+dotenv_util.load_dotenv()
+
 VIDEO_W, VIDEO_H   = 1080, 1920
 FPS                = 30
 CAPTION_DELAY_SEC  = 0.02   # FIX #1: was 0.08 — large delay caused first-glyph miss

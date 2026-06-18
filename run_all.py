@@ -23,7 +23,11 @@ PY   = sys.executable
 
 # import the sync module to reuse its client discovery + inbox check
 sys.path.insert(0, str(HERE))
+import approval_mail
+import dotenv_util
 import rclone_sync as rs
+
+dotenv_util.load_dotenv()
 
 VERDICT = {0: "DELIVERED", 2: "NOT DELIVERED (failed QC)", 1: "ERROR"}
 
@@ -65,6 +69,12 @@ def main():
     # Tell the operator to review the human-eye flags
     print("\n  Review delivered reels for the subjective flags (music/SFX feel,")
     print("  transitions, caption taste) - see each project's edit/REVIEW.md.")
+
+    # ── approval email ───────────────────────────────────────────────────────
+    print(f"\n{'='*64}\n  APPROVAL EMAIL\n{'='*64}")
+    mail_report = approval_mail.send_batch_approval_email(results)
+    for recipient, status in mail_report.items():
+        print(f"  {recipient:32} -> {status}")
 
 
 if __name__ == "__main__":

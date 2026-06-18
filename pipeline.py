@@ -357,7 +357,10 @@ FIXES applied:
 import argparse, json, os, random, re, subprocess, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import dotenv_util
 import reel_captions as rc
+
+dotenv_util.load_dotenv()
 
 STAGES = ["merge", "transcribe", "sound", "effects", "captions", "finalize"]
 HERE   = Path(__file__).resolve().parent

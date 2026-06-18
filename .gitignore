@@ -12,5 +12,10 @@ __pycache__/
 projects/
 delivered/
 
+project/
+
 # Diagnostic scratch
 diag_whoosh.py
+
+# Email fallback (when SMTP not configured)
+sent_emails/
