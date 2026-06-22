@@ -248,6 +248,27 @@ def _reel_for(client: str, timestamp: str | None = None) -> Path:
     return reels[-1]
 
 
+def _thumbnail_for(client: str, timestamp: str | None = None) -> Path | None:
+    """Return the archived thumbnail for a reel, if one exists."""
+    folder = DELIVERED_DIR / client
+    if timestamp:
+        exact = folder / f"Thumbnail_{timestamp}.png"
+        if exact.exists():
+            return exact
+        cap_path = PROJECTS_DIR / client / "edit" / "caption.json"
+        if cap_path.exists():
+            try:
+                data = json.loads(cap_path.read_text(encoding="utf-8"))
+                p = Path(data.get("thumbnail_path", ""))
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+        return None
+    thumbs = sorted(folder.glob("Thumbnail_*.png"))
+    return thumbs[-1] if thumbs else None
+
+
 def _load_caption(client: str) -> str:
     """Build the Instagram caption (caption text + hashtags) from caption.json."""
     cap_path = PROJECTS_DIR / client / "edit" / "caption.json"
@@ -279,11 +300,31 @@ def upload_to_cloudinary(video_path: Path) -> str:
     return secure_url
 
 
-def create_container(video_url: str, caption: str) -> str:
+def upload_image_to_cloudinary(image_path: Path) -> str:
+    """Unsigned upload of a PNG cover -> returns the public secure_url."""
+    url = f"https://api.cloudinary.com/v1_1/{CL_CLOUD}/image/upload"
+    print(f"  [cloudinary] uploading cover {image_path.name} ({image_path.stat().st_size/1e3:.0f} KB)...")
+    with open(image_path, "rb") as f:
+        r = requests.post(url, data={"upload_preset": CL_PRESET},
+                          files={"file": (image_path.name, f, "image/png")}, timeout=120)
+    if r.status_code not in (200, 201):
+        raise PostError(f"Cloudinary image upload failed: {r.status_code} {r.text[:300]}")
+    secure_url = r.json().get("secure_url", "")
+    if not secure_url:
+        raise PostError(f"Cloudinary returned no secure_url: {r.text[:300]}")
+    print(f"  [cloudinary] cover_url -> {secure_url}")
+    return secure_url
+
+
+def create_container(video_url: str, caption: str, cover_url: str | None = None) -> str:
     print("  [graph] creating REELS container...")
+    payload = {"media_type": "REELS", "video_url": video_url, "caption": caption}
+    if cover_url:
+        payload["cover_url"] = cover_url
+        print(f"  [graph] using custom cover thumbnail")
     r = requests.post(f"{GRAPH}/{IG_ID}/media",
                       params={"access_token": TOKEN},
-                      data={"media_type": "REELS", "video_url": video_url, "caption": caption},
+                      data=payload,
                       timeout=60)
     if r.status_code != 200:
         raise PostError(f"create container failed: {r.status_code} {r.text[:300]}")
@@ -327,19 +368,27 @@ def post_reel(client: str, dry: bool = False, timestamp: str | None = None) -> d
         raise PostError("IG_ACCESS_TOKEN not set in .env")
     reel = _reel_for(client, timestamp)
     caption = _load_caption(client)
+    thumb = _thumbnail_for(client, timestamp)
     print(f"\n  posting reel for '{client}': {reel.name}")
+    if thumb:
+        print(f"  thumbnail: {thumb.name}")
+    else:
+        print("  thumbnail: none (Instagram will auto-pick a frame)")
     print(f"  caption preview: {caption[:80]!r}{'...' if len(caption) > 80 else ''}")
 
     video_url = upload_to_cloudinary(reel)
-    container_id = create_container(video_url, caption)
+    cover_url = upload_image_to_cloudinary(thumb) if thumb else None
+    container_id = create_container(video_url, caption, cover_url=cover_url)
     wait_until_finished(container_id)
 
     if dry:
         print("  [dry] skipping final publish. Container is ready and would post.")
-        return {"ok": True, "dry": True, "video_url": video_url, "container_id": container_id}
+        return {"ok": True, "dry": True, "video_url": video_url,
+                "cover_url": cover_url, "container_id": container_id}
 
     post_id = publish(container_id)
-    return {"ok": True, "post_id": post_id, "video_url": video_url, "container_id": container_id}
+    return {"ok": True, "post_id": post_id, "video_url": video_url,
+            "cover_url": cover_url, "container_id": container_id}
 
 
 def main():

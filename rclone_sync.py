@@ -256,6 +256,7 @@ HERE   = Path(__file__).resolve().parent
 PROJECTS_DIR  = HERE / "projects"
 DELIVERED_DIR = HERE / "delivered"
 VIDEO_EXTS    = (".mp4", ".mov", ".MP4", ".MOV")
+THUMB_EXTS    = (".png", ".PNG")
 
 def _resolve_rclone():
     """Find the rclone executable portably (works on Windows, Mac, Linux, venv).
@@ -341,6 +342,13 @@ def inbox_clips(client):
     return [ln.strip() for ln in r.stdout.splitlines()
             if ln.strip().endswith(VIDEO_EXTS)]
 
+def inbox_thumbnails(client):
+    """Return top-level .png filenames in the Drive inbox (excludes done/)."""
+    r = run(["rclone", "lsf", drive_path(client),
+             "--files-only", "--max-depth", "1"])
+    return sorted(ln.strip() for ln in r.stdout.splitlines()
+                  if ln.strip().endswith(THUMB_EXTS))
+
 def fetch(client):
     """Wipe local raw/, then download the Drive inbox clips into it."""
     check_rclone()
@@ -356,15 +364,20 @@ def fetch(client):
         shutil.rmtree(raw)
     raw.mkdir(parents=True, exist_ok=True)
 
-    # Copy ONLY top-level clips (max-depth 1 excludes done/)
+    thumbs = inbox_thumbnails(client)
+
+    # Copy ONLY top-level clips + thumbnails (max-depth 1 excludes done/)
     print(f"  fetch: downloading {len(clips)} clip(s) for '{client}' -> {raw}")
     run(["rclone", "copy", drive_path(client), str(raw),
          "--max-depth", "1",
          "--include", "*.mp4", "--include", "*.mov",
-         "--include", "*.MP4", "--include", "*.MOV"])
+         "--include", "*.MP4", "--include", "*.MOV",
+         "--include", "*.png", "--include", "*.PNG"])
 
     got = sorted(p.name for p in raw.iterdir() if p.suffix in VIDEO_EXTS)
     print(f"  fetch: raw/ now has {len(got)} clip(s): {got}")
+    if thumbs:
+        print(f"  fetch: thumbnail(s) in inbox: {thumbs}")
     return got
 
 def archive(client):
@@ -378,6 +391,8 @@ def archive(client):
         sys.exit(f"ERROR: {final} not found. Archive only runs AFTER a successful pipeline run.")
 
     clips = inbox_clips(client)
+    thumbs = inbox_thumbnails(client)
+    thumb_name = f"Thumbnail_{ts}.png" if thumbs else ""
 
     # 1. Move inbox clips -> done/Videos/Video_<ts>/   (MOVE, not delete)
     #    We use per-file `moveto` (one named source -> one named dest) instead of a
@@ -393,6 +408,20 @@ def archive(client):
             run(["rclone", "moveto", src, dst])
     else:
         print("  archive: no inbox clips to move (already archived?).")
+
+    # 1b. Move inbox thumbnail(s) -> done/Thumbnails/Thumbnail_<ts>.png
+    #     If multiple PNGs exist, use the first alphabetically and warn.
+    local_thumb = None
+    if thumbs:
+        if len(thumbs) > 1:
+            print(f"  archive: multiple thumbnails found {thumbs}; using '{thumbs[0]}'")
+        src_name = thumbs[0]
+        thumb_dest = drive_path(client, "done", "Thumbnails", thumb_name)
+        print(f"  archive: moving thumbnail '{src_name}' -> {thumb_dest}")
+        run(["rclone", "moveto", drive_path(client) + f"/{src_name}", thumb_dest])
+        raw_thumb = PROJECTS_DIR / client / "raw" / src_name
+        if raw_thumb.exists():
+            local_thumb = raw_thumb
 
     # 2. Upload finished reel -> done/Processed_Video/Processed_<ts>.mp4
     proc_name = f"Processed_{ts}.mp4"
@@ -410,6 +439,17 @@ def archive(client):
     local_out = local_dir / proc_name
     shutil.copy2(final, local_out)
     print(f"  archive: local copy -> {local_out}")
+
+    # 3b. Local thumbnail copy -> delivered/<client>/Thumbnail_<ts>.png
+    local_thumb_out = None
+    if thumb_name:
+        local_thumb_out = local_dir / thumb_name
+        if local_thumb and local_thumb.exists():
+            shutil.copy2(local_thumb, local_thumb_out)
+            print(f"  archive: thumbnail copy -> {local_thumb_out}")
+        else:
+            print(f"  archive: thumbnail not found locally ({local_thumb}); Instagram will skip cover.")
+            local_thumb_out = None
 
     # 4. Shareable Drive link for the email preview ("anyone with the link").
     remote_file = f"{proc_dest}/{proc_name}"
@@ -436,6 +476,9 @@ def archive(client):
     data["drive_path"] = remote_file
     data["processed_name"] = proc_name
     data["timestamp"] = ts
+    if thumb_name and local_thumb_out and local_thumb_out.exists():
+        data["thumbnail_name"] = thumb_name
+        data["thumbnail_path"] = str(local_thumb_out)
     try:
         cap_path.parent.mkdir(parents=True, exist_ok=True)
         cap_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
