@@ -16,7 +16,7 @@ from pathlib import Path
 
 VW, VH, FPS = 1080, 1920, 30
 FADE = 0.015          # FIX #1 partial: was 0.03 — shorter fade preserves edge syllables
-LUFS_I, LUFS_TP = -14, -1
+LUFS_I, LUFS_TP = -14, -1.5   # TP -1.5 (was -1): cooler handoff -> more true-peak headroom for finalize
 LUFS_LRA = 5          # FIX #4: was 11 — tighter range = speakers balanced within clip
 SIL_NOISE, SIL_MIN = "-32dB", 0.20
 EDGE_PAD = 0.06

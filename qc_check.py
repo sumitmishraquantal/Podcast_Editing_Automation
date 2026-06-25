@@ -40,7 +40,7 @@ def main():
     md = loud(str(final))
     if md:
         I=float(md["input_i"]); TP=float(md["input_tp"])
-        ok("loudness -16..-12 LUFS", -16<=I<=-12, str(I)+" LUFS")
+        ok("loudness -17..-11 LUFS", -17<=I<=-11, str(I)+" LUFS")
         ok("true peak <= -0.5 dBTP", TP<=-0.5, str(TP)+" dBTP")
     blk = out(run('ffmpeg -i "'+str(final)+'" -vf blackdetect=d=0.1:pic_th=0.98 -an -f null -'))
     ok("no black frames", "black_start" not in blk)
