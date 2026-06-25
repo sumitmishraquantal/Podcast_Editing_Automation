@@ -82,6 +82,7 @@
 #     reel_url = ""
 #     drive_path = ""
 #     processed_name = ""
+#     timestamp = ""
 #     if caption_path.exists():
 #         try:
 #             cap = json.loads(caption_path.read_text(encoding="utf-8"))
@@ -90,6 +91,7 @@
 #             reel_url = str(cap.get("reel_url", "")).strip()
 #             drive_path = str(cap.get("drive_path", "")).strip()
 #             processed_name = str(cap.get("processed_name", "")).strip()
+#             timestamp = str(cap.get("timestamp", "")).strip()
 #         except Exception:  # noqa: BLE001
 #             pass
 
@@ -113,6 +115,7 @@
 #         "reel_url": reel_url,
 #         "drive_path": drive_path,
 #         "processed_name": processed_name,
+#         "timestamp": timestamp,
 #         "reel_path": reel_path,
 #         "drive_hint": drive_hint,
 #     }
@@ -129,33 +132,34 @@
 
 
 # def _approval_buttons(client: str, d: dict, owner_from: str) -> str:
-#     """Approve / Decline as mailto links producing a structured reply.
+#     """Approve / Decline as links to the approval server.
 
-#     A button in email can't run code without a server. mailto opens a pre-filled
-#     reply the operator sends; the structured subject is machine-parseable later
-#     when an endpoint (+ Meta Graph API posting) is added. For now, sending the
-#     reply IS the approval record.
+#     Clicking hits APPROVAL_BASE_URL/approve|decline/<client>/<timestamp>?who=<owner>.
+#     The server records the decision (shared state) and, on approve, posts the reel
+#     to Instagram in the background. A second viewer who clicks later sees
+#     "already decided by <who>".
 #     """
-#     to = quote(owner_from)  # reply goes back to the sender (the SMTP_USER)
-#     tag = d.get("processed_name") or client
-#     approve_subj = quote(f"APPROVE {client} {tag} - upload to Instagram")
-#     decline_subj = quote(f"DECLINE {client} {tag} - do not upload")
-#     approve_body = quote(f"Approved {client} reel ({tag}) for Instagram upload.")
-#     decline_body = quote(f"Declined {client} reel ({tag}). Not for upload.")
-#     approve = f"mailto:{to}?subject={approve_subj}&body={approve_body}"
-#     decline = f"mailto:{to}?subject={decline_subj}&body={decline_body}"
+#     base = os.environ.get("APPROVAL_BASE_URL", "").strip().rstrip("/")
+#     ts = d.get("timestamp") or ""
+#     if not base or not ts:
+#         # No server configured yet -> show a clear note instead of dead buttons.
+#         return ('<p style="margin:14px 0 0;color:#9ca3af;font-size:12px">'
+#                 'Approval buttons inactive (APPROVAL_BASE_URL or reel timestamp missing).</p>')
+#     who = quote(owner_from.split("@")[0] if owner_from else "owner")
+#     approve = f"{base}/approve/{quote(client)}/{quote(ts)}?who={who}"
+#     decline = f"{base}/decline/{quote(client)}/{quote(ts)}?who={who}"
 #     return f"""
 #       <div style="margin:16px 0 4px">
 #         <a href="{approve}" style="display:inline-block;background:#16a34a;color:#fff;
 #            text-decoration:none;padding:11px 26px;border-radius:6px;font-weight:700;
-#            font-size:14px;margin-right:10px">✓ Approve for Instagram</a>
+#            font-size:14px;margin-right:10px">✓ Approve &amp; post to Instagram</a>
 #         <a href="{decline}" style="display:inline-block;background:#dc2626;color:#fff;
 #            text-decoration:none;padding:11px 26px;border-radius:6px;font-weight:700;
 #            font-size:14px">✕ Decline</a>
 #       </div>
 #       <p style="margin:6px 0 0;color:#9ca3af;font-size:11px">
-#         Approving opens a pre-filled reply — just hit send. (Instagram auto-posting
-#         connects later via the Meta Graph API.)</p>"""
+#         One click posts the reviewed reel automatically. If someone already decided,
+#         you'll see who and when.</p>"""
 
 
 # def _watch_button(d: dict) -> str:
@@ -351,6 +355,11 @@
 
 
 
+
+
+
+
+
 #!/usr/bin/env python3
 """
 approval_mail.py - send a batch approval email after run_all.py finishes.
@@ -500,19 +509,19 @@ def _approval_buttons(client: str, d: dict, owner_from: str) -> str:
                 'Approval buttons inactive (APPROVAL_BASE_URL or reel timestamp missing).</p>')
     who = quote(owner_from.split("@")[0] if owner_from else "owner")
     approve = f"{base}/approve/{quote(client)}/{quote(ts)}?who={who}"
-    decline = f"{base}/decline/{quote(client)}/{quote(ts)}?who={who}"
+    rerun   = f"{base}/rerun/{quote(client)}/{quote(ts)}?who={who}"
     return f"""
       <div style="margin:16px 0 4px">
         <a href="{approve}" style="display:inline-block;background:#16a34a;color:#fff;
            text-decoration:none;padding:11px 26px;border-radius:6px;font-weight:700;
            font-size:14px;margin-right:10px">✓ Approve &amp; post to Instagram</a>
-        <a href="{decline}" style="display:inline-block;background:#dc2626;color:#fff;
+        <a href="{rerun}" style="display:inline-block;background:#2563eb;color:#fff;
            text-decoration:none;padding:11px 26px;border-radius:6px;font-weight:700;
-           font-size:14px">✕ Decline</a>
+           font-size:14px">↻ Rerun (re-edit)</a>
       </div>
       <p style="margin:6px 0 0;color:#9ca3af;font-size:11px">
-        One click posts the reviewed reel automatically. If someone already decided,
-        you'll see who and when.</p>"""
+        Approve posts the reel and archives the clips. Rerun re-edits from the same
+        clips and emails you a fresh version. Source clips stay put until you approve.</p>"""
 
 
 def _watch_button(d: dict) -> str:

@@ -54,6 +54,41 @@ LEXICON = {
  "myself","yourself","love","loved","scared","saved","grow","truth","real",
 }
 
+
+
+def sentence_glitch_times(words, cuts, dur, gmax=3, seam_gap=1.0, min_spacing=4.0):
+    """Compute the timestamps where a sentence-end glitch should fire.
+
+    Shared by stage_sound (to place the click SFX) and stage_effects (to place
+    the visual glitch) so audio and video stay perfectly in sync. Rules:
+      - trigger on words whose text ends in . ? !
+      - cap at gmax; skip any within seam_gap of a clip seam (no double FX);
+        enforce min_spacing between glitches; avoid first/last 1s.
+    """
+    ends = []
+    for w in words:
+        txt = str(w.get("word", "")).strip()
+        if txt and txt[-1] in ".?!":
+            try:
+                ends.append(round(float(w["end"]), 3))
+            except Exception:
+                pass
+    out = []
+    last = -999.0
+    for t in ends:
+        if t < 1.0 or t > dur - 1.0:
+            continue
+        if any(abs(t - c) < seam_gap for c in cuts):
+            continue
+        if t - last < min_spacing:
+            continue
+        out.append(t)
+        last = t
+        if len(out) >= gmax:
+            break
+    return out
+
+
 def run(cmd):
     r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if r.returncode != 0:
@@ -111,22 +146,49 @@ def ts(sec):
 def build_ass(words, out, power, alert):
     import random
     b = chr(92)
-    BODY  = ["Montserrat","Oswald","Bebas Neue","Archivo Black"]
-    SCRIPT= ["Pacifico","Caveat"]
-    EMPH  = ["&H0000D4FF","&H004D4DFF","&H00F0C814","&H0050C0FF","&H00B478FF"]
-    rng   = random.Random()
-    body  = rng.choice(BODY)
-    base  = int(VIDEO_H*0.054)
-    if body in ("Bebas Neue","Oswald"): base = int(VIDEO_H*0.064)
-    if body == "Archivo Black":         base = int(VIDEO_H*0.051)
+    # ── CURATED CAPTION PRESETS (2026 research-backed) ───────────────────────
+    # Each preset is a COMPLETE, proven look (font + highlight + case + outline).
+    # We randomize across PRESETS, not across every option, so every reel lands
+    # on a combination that works. No more "bad roll" mixes.
+    #   - body  : the caption font (all are bold sans-serif = best mobile readability)
+    #   - emph  : keyword highlight colour in ASS hex &H00BBGGRR
+    #             yellow #FFD400 -> &H0000D4FF | orange #FF7A1A -> &H001A7AFF
+    #             white         -> &H00FFFFFF
+    #   - case  : "mixed" (title case, readable/credible) or "upper" (high energy)
+    #   - wv    : words per card (1 = word-by-word karaoke; 2 = short phrase)
+    # Highlight colours chosen per research: yellow/orange/red on white text.
+    # NOTE: font names below are the INTERNAL family names libass matches on
+    # (verified via fonttools), NOT the .ttf filenames. All are bold/heavy
+    # weights - the bundled Montserrat.ttf is the THIN weight (wrong for captions)
+    # and is intentionally NOT used. Poppins ExtraBold is the rounded-geometric
+    # stand-in for the "Montserrat Bold" the research recommends.
+    PRESETS = [
+        # "Clean Educational" - Montserrat Bold (2026 #1 research pick), yellow keyword
+        {"name":"clean_edu", "body":"Montserrat", "emph":"&H0000D4FF",  # yellow
+         "emph_font":"Montserrat", "case":"mixed", "outline":4, "shadow":2, "wv":1},
+        # "Bold Punch" - condensed ultra-bold, high energy, orange keyword, ALL CAPS
+        {"name":"bold_punch", "body":"Anton", "emph":"&H001A7AFF",      # orange
+         "emph_font":"Anton", "case":"upper", "outline":5, "shadow":2, "wv":1},
+        # "Editorial" - Oswald condensed, clean and credible, yellow keyword
+        {"name":"editorial", "body":"Oswald", "emph":"&H0000D4FF",      # yellow
+         "emph_font":"Oswald", "case":"mixed", "outline":4, "shadow":1, "wv":2},
+    ]
+    rng = random.Random()
+    preset = rng.choice(PRESETS)
+    body      = preset["body"]
+    emph      = preset["emph"]
+    emph_font = preset["emph_font"]
+    case      = preset["case"]
+    outline   = preset["outline"]
+    shadow    = preset["shadow"]
+    wv        = preset["wv"]
     active    = "&H00FFFFFF"; dim = "&H64FFFFFF"
-    emph      = rng.choice(EMPH)
-    emph_font = rng.choice(SCRIPT) if rng.random() < 0.7 else body
-    case      = rng.choice(["mixed","upper"])
-    outline   = rng.choice([3,4,5]); shadow = rng.choice([1,2,3])
-    wv        = rng.choice([1,2,3])
-    print("  caption style:", body, "/", ("UPPER" if case=="upper" else "mixed"),
-          "/ emph", emph, "in", emph_font, "/", wv, "word(s)/card")
+    # size tuned per font family so all presets read at the same on-screen weight
+    base = int(VIDEO_H*0.054)
+    if body in ("Bebas Neue","Oswald","Anton"): base = int(VIDEO_H*0.064)
+    if body == "Archivo Black":                 base = int(VIDEO_H*0.051)
+    print("  caption preset:", preset["name"], "|", body, "/",
+          ("UPPER" if case=="upper" else "mixed"), "/ emph", emph, "/", wv, "word(s)/card")
 
     groups = [words[i:i+wv] for i in range(0, len(words), wv)]
     px, py = VIDEO_W//2, int(VIDEO_H*0.72)

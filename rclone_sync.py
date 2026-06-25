@@ -1,4 +1,3 @@
-# #!/usr/bin/env python3
 # """
 # rclone_sync.py - Google Drive <-> local sync for the reel pipeline (Phase 1)
 
@@ -46,13 +45,20 @@
 # PROJECTS_DIR  = HERE / "projects"
 # DELIVERED_DIR = HERE / "delivered"
 # VIDEO_EXTS    = (".mp4", ".mov", ".MP4", ".MOV")
+# THUMB_EXTS    = (".png", ".PNG")
 
 # def _resolve_rclone():
 #     """Find the rclone executable portably (works on Windows, Mac, Linux, venv).
 
-#     Order: RCLONE_EXE env override -> shutil.which on PATH -> 'rclone' as last resort.
-#     shutil.which() handles the Windows .exe extension and searches PATH the same
-#     way the shell does, which a bare subprocess(['rclone',...]) does not.
+#     Order:
+#       1. RCLONE_EXE env override (if set and exists)
+#       2. shutil.which on PATH
+#       3. known install locations (winget on Windows) via glob
+#       4. 'rclone' as last resort (surfaces a clear error if truly missing)
+
+#     Step 3 matters because automated runners (the Routine, cron, services) often
+#     do NOT inherit the user's PATH or env vars, so rclone can be installed yet
+#     invisible. Globbing the winget package dir finds it regardless of version.
 #     """
 #     override = os.environ.get("RCLONE_EXE")
 #     if override and Path(override).exists():
@@ -60,7 +66,21 @@
 #     found = shutil.which("rclone")
 #     if found:
 #         return found
-#     return "rclone"  # last resort; will surface a clear error if truly missing
+#     # Known install locations (version-agnostic glob)
+#     import glob
+#     home = Path.home()
+#     patterns = [
+#         str(home / "AppData/Local/Microsoft/WinGet/Packages/Rclone.Rclone_*/rclone-*/rclone.exe"),
+#         str(home / "scoop/apps/rclone/current/rclone.exe"),
+#         r"C:\ProgramData\chocolatey\bin\rclone.exe",
+#         r"C:\rclone\rclone.exe",
+#         "/usr/bin/rclone", "/usr/local/bin/rclone", "/opt/homebrew/bin/rclone",
+#     ]
+#     for pat in patterns:
+#         hits = glob.glob(pat)
+#         if hits:
+#             return hits[0]
+#     return "rclone"  # last resort
 
 # RCLONE = _resolve_rclone()
 
@@ -111,6 +131,13 @@
 #     return [ln.strip() for ln in r.stdout.splitlines()
 #             if ln.strip().endswith(VIDEO_EXTS)]
 
+# def inbox_thumbnails(client):
+#     """Return top-level .png filenames in the Drive inbox (excludes done/)."""
+#     r = run(["rclone", "lsf", drive_path(client),
+#              "--files-only", "--max-depth", "1"])
+#     return sorted(ln.strip() for ln in r.stdout.splitlines()
+#                   if ln.strip().endswith(THUMB_EXTS))
+
 # def fetch(client):
 #     """Wipe local raw/, then download the Drive inbox clips into it."""
 #     check_rclone()
@@ -126,15 +153,20 @@
 #         shutil.rmtree(raw)
 #     raw.mkdir(parents=True, exist_ok=True)
 
-#     # Copy ONLY top-level clips (max-depth 1 excludes done/)
+#     thumbs = inbox_thumbnails(client)
+
+#     # Copy ONLY top-level clips + thumbnails (max-depth 1 excludes done/)
 #     print(f"  fetch: downloading {len(clips)} clip(s) for '{client}' -> {raw}")
 #     run(["rclone", "copy", drive_path(client), str(raw),
 #          "--max-depth", "1",
 #          "--include", "*.mp4", "--include", "*.mov",
-#          "--include", "*.MP4", "--include", "*.MOV"])
+#          "--include", "*.MP4", "--include", "*.MOV",
+#          "--include", "*.png", "--include", "*.PNG"])
 
 #     got = sorted(p.name for p in raw.iterdir() if p.suffix in VIDEO_EXTS)
 #     print(f"  fetch: raw/ now has {len(got)} clip(s): {got}")
+#     if thumbs:
+#         print(f"  fetch: thumbnail(s) in inbox: {thumbs}")
 #     return got
 
 # def archive(client):
@@ -148,6 +180,8 @@
 #         sys.exit(f"ERROR: {final} not found. Archive only runs AFTER a successful pipeline run.")
 
 #     clips = inbox_clips(client)
+#     thumbs = inbox_thumbnails(client)
+#     thumb_name = f"Thumbnail_{ts}.png" if thumbs else ""
 
 #     # 1. Move inbox clips -> done/Videos/Video_<ts>/   (MOVE, not delete)
 #     #    We use per-file `moveto` (one named source -> one named dest) instead of a
@@ -163,6 +197,20 @@
 #             run(["rclone", "moveto", src, dst])
 #     else:
 #         print("  archive: no inbox clips to move (already archived?).")
+
+#     # 1b. Move inbox thumbnail(s) -> done/Thumbnails/Thumbnail_<ts>.png
+#     #     If multiple PNGs exist, use the first alphabetically and warn.
+#     local_thumb = None
+#     if thumbs:
+#         if len(thumbs) > 1:
+#             print(f"  archive: multiple thumbnails found {thumbs}; using '{thumbs[0]}'")
+#         src_name = thumbs[0]
+#         thumb_dest = drive_path(client, "done", "Thumbnails", thumb_name)
+#         print(f"  archive: moving thumbnail '{src_name}' -> {thumb_dest}")
+#         run(["rclone", "moveto", drive_path(client) + f"/{src_name}", thumb_dest])
+#         raw_thumb = PROJECTS_DIR / client / "raw" / src_name
+#         if raw_thumb.exists():
+#             local_thumb = raw_thumb
 
 #     # 2. Upload finished reel -> done/Processed_Video/Processed_<ts>.mp4
 #     proc_name = f"Processed_{ts}.mp4"
@@ -180,6 +228,51 @@
 #     local_out = local_dir / proc_name
 #     shutil.copy2(final, local_out)
 #     print(f"  archive: local copy -> {local_out}")
+
+#     # 3b. Local thumbnail copy -> delivered/<client>/Thumbnail_<ts>.png
+#     local_thumb_out = None
+#     if thumb_name:
+#         local_thumb_out = local_dir / thumb_name
+#         if local_thumb and local_thumb.exists():
+#             shutil.copy2(local_thumb, local_thumb_out)
+#             print(f"  archive: thumbnail copy -> {local_thumb_out}")
+#         else:
+#             print(f"  archive: thumbnail not found locally ({local_thumb}); Instagram will skip cover.")
+#             local_thumb_out = None
+
+#     # 4. Shareable Drive link for the email preview ("anyone with the link").
+#     remote_file = f"{proc_dest}/{proc_name}"
+#     share_url = ""
+#     try:
+#         r = run(["rclone", "link", remote_file])
+#         share_url = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
+#         if share_url:
+#             print(f"  archive: share link -> {share_url}")
+#     except Exception as e:
+#         print(f"  archive: could not make share link ({e}) - email will omit preview.")
+
+#     # Persist link + drive path into edit/caption.json so the email builder
+#     # has everything in one place. Merge, don't clobber, the caption fields.
+#     import json as _json
+#     cap_path = PROJECTS_DIR / client / "edit" / "caption.json"
+#     data = {}
+#     if cap_path.exists():
+#         try:
+#             data = _json.loads(cap_path.read_text(encoding="utf-8"))
+#         except Exception:
+#             data = {}
+#     data["reel_url"] = share_url
+#     data["drive_path"] = remote_file
+#     data["processed_name"] = proc_name
+#     data["timestamp"] = ts
+#     if thumb_name and local_thumb_out and local_thumb_out.exists():
+#         data["thumbnail_name"] = thumb_name
+#         data["thumbnail_path"] = str(local_thumb_out)
+#     try:
+#         cap_path.parent.mkdir(parents=True, exist_ok=True)
+#         cap_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+#     except Exception as e:
+#         print(f"  archive: could not update caption.json ({e})")
 
 #     print(f"  archive: done. Timestamp {ts} links the raw set to the reel.")
 #     return ts
@@ -203,8 +296,6 @@
 
 # if __name__ == "__main__":
 #     main()
-
-
 
 
 
@@ -380,92 +471,68 @@ def fetch(client):
         print(f"  fetch: thumbnail(s) in inbox: {thumbs}")
     return got
 
-def archive(client):
-    """After a successful run: archive raw clips + finished reel, versioned by timestamp."""
+def preview(client):
+    """At DELIVERY time: make the reel reviewable WITHOUT archiving the source.
+
+    - uploads the finished reel  -> done/Processed_Video/Processed_<ts>.mp4 (overwrite)
+    - makes a shareable link and writes reel_url/timestamp/etc into edit/caption.json
+    - keeps a local copy in delivered/<client>/
+    - DOES NOT move the raw clips or thumbnail: they stay in the TEST inbox so a
+      Rerun can re-edit them, and so nothing is committed until the user approves.
+
+    Returns the timestamp string.
+    """
     check_rclone()
     ts    = timestamp()
     edit  = PROJECTS_DIR / client / "edit"
     final = edit / "final.mp4"
-
     if not final.exists():
-        sys.exit(f"ERROR: {final} not found. Archive only runs AFTER a successful pipeline run.")
+        sys.exit(f"ERROR: {final} not found. preview only runs AFTER a successful pipeline run.")
 
-    clips = inbox_clips(client)
+    # thumbnail (if the pipeline/raw produced one) - copied locally for the email,
+    # but NOT moved on Drive yet (that happens in finalize on approval).
     thumbs = inbox_thumbnails(client)
     thumb_name = f"Thumbnail_{ts}.png" if thumbs else ""
-
-    # 1. Move inbox clips -> done/Videos/Video_<ts>/   (MOVE, not delete)
-    #    We use per-file `moveto` (one named source -> one named dest) instead of a
-    #    directory `move`. A directory move fails here because the destination
-    #    (done/Videos/...) is nested INSIDE the source (TEST/), which rclone blocks
-    #    as "overlapping remotes". Per-file moveto sidesteps that check entirely.
-    if clips:
-        dest_dir = drive_path(client, "done", "Videos", f"Video_{ts}")
-        print(f"  archive: moving {len(clips)} raw clip(s) -> {dest_dir}")
-        for fname in clips:
-            src = drive_path(client) + f"/{fname}"
-            dst = f"{dest_dir}/{fname}"
-            run(["rclone", "moveto", src, dst])
-    else:
-        print("  archive: no inbox clips to move (already archived?).")
-
-    # 1b. Move inbox thumbnail(s) -> done/Thumbnails/Thumbnail_<ts>.png
-    #     If multiple PNGs exist, use the first alphabetically and warn.
-    local_thumb = None
+    local_thumb_out = None
     if thumbs:
-        if len(thumbs) > 1:
-            print(f"  archive: multiple thumbnails found {thumbs}; using '{thumbs[0]}'")
         src_name = thumbs[0]
-        thumb_dest = drive_path(client, "done", "Thumbnails", thumb_name)
-        print(f"  archive: moving thumbnail '{src_name}' -> {thumb_dest}")
-        run(["rclone", "moveto", drive_path(client) + f"/{src_name}", thumb_dest])
         raw_thumb = PROJECTS_DIR / client / "raw" / src_name
+        local_dir = DELIVERED_DIR / client
+        local_dir.mkdir(parents=True, exist_ok=True)
         if raw_thumb.exists():
-            local_thumb = raw_thumb
+            local_thumb_out = local_dir / thumb_name
+            shutil.copy2(raw_thumb, local_thumb_out)
+            print(f"  preview: thumbnail copy -> {local_thumb_out}")
 
-    # 2. Upload finished reel -> done/Processed_Video/Processed_<ts>.mp4
+    # 1. Upload finished reel -> done/Processed_Video/Processed_<ts>.mp4 (overwrite)
     proc_name = f"Processed_{ts}.mp4"
     proc_dest = drive_path(client, "done", "Processed_Video")
-    print(f"  archive: uploading reel -> {proc_dest}/{proc_name}")
-    print("  archive: (large uploads can take several minutes on slow connections)")
-    # rclone copyto renames in one step; -P streams live progress so a slow
-    # upload looks healthy instead of hung. --stats forces periodic updates.
+    print(f"  preview: uploading reel -> {proc_dest}/{proc_name}")
+    print("  preview: (large uploads can take several minutes on slow connections)")
     run(["rclone", "copyto", str(final), f"{proc_dest}/{proc_name}",
          "-P", "--stats", "5s"], capture=False)
 
-    # 3. Local copy -> delivered/<client>/Processed_<ts>.mp4
+    # 2. Local copy -> delivered/<client>/Processed_<ts>.mp4
     local_dir = DELIVERED_DIR / client
     local_dir.mkdir(parents=True, exist_ok=True)
     local_out = local_dir / proc_name
     shutil.copy2(final, local_out)
-    print(f"  archive: local copy -> {local_out}")
+    print(f"  preview: local copy -> {local_out}")
 
-    # 3b. Local thumbnail copy -> delivered/<client>/Thumbnail_<ts>.png
-    local_thumb_out = None
-    if thumb_name:
-        local_thumb_out = local_dir / thumb_name
-        if local_thumb and local_thumb.exists():
-            shutil.copy2(local_thumb, local_thumb_out)
-            print(f"  archive: thumbnail copy -> {local_thumb_out}")
-        else:
-            print(f"  archive: thumbnail not found locally ({local_thumb}); Instagram will skip cover.")
-            local_thumb_out = None
-
-    # 4. Shareable Drive link for the email preview ("anyone with the link").
+    # 3. Shareable Drive link for the email preview ("anyone with the link").
     remote_file = f"{proc_dest}/{proc_name}"
     share_url = ""
     try:
         r = run(["rclone", "link", remote_file])
         share_url = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
         if share_url:
-            print(f"  archive: share link -> {share_url}")
+            print(f"  preview: share link -> {share_url}")
     except Exception as e:
-        print(f"  archive: could not make share link ({e}) - email will omit preview.")
+        print(f"  preview: could not make share link ({e}) - email will omit preview.")
 
-    # Persist link + drive path into edit/caption.json so the email builder
-    # has everything in one place. Merge, don't clobber, the caption fields.
+    # 4. Merge link + paths into edit/caption.json (don't clobber caption fields).
     import json as _json
-    cap_path = PROJECTS_DIR / client / "edit" / "caption.json"
+    cap_path = edit / "caption.json"
     data = {}
     if cap_path.exists():
         try:
@@ -483,15 +550,75 @@ def archive(client):
         cap_path.parent.mkdir(parents=True, exist_ok=True)
         cap_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"  archive: could not update caption.json ({e})")
+        print(f"  preview: could not update caption.json ({e})")
 
-    print(f"  archive: done. Timestamp {ts} links the raw set to the reel.")
+    print(f"  preview: done. Reel is reviewable; clips remain in the inbox until approval.")
     return ts
 
-# ── cli ───────────────────────────────────────────────────────────────────────
+
+def finalize(client, timestamp_str=None):
+    """On APPROVAL: move the source clips + thumbnail to their archive home.
+
+    The reel itself was already uploaded by preview(); here we only move the raw
+    inputs out of the inbox so the inbox is clean and the set is archived under
+    the SAME timestamp the email/approval referenced.
+
+    - clips     -> done/Videos/Video_<ts>/
+    - thumbnail -> done/Thumbnails/Thumbnail_<ts>.png
+    """
+    check_rclone()
+    # Prefer the approved reel's timestamp (from caption.json) so the archived
+    # Video_<ts> folder matches the reel the user actually approved.
+    ts = timestamp_str
+    if not ts:
+        import json as _json
+        cap_path = PROJECTS_DIR / client / "edit" / "caption.json"
+        if cap_path.exists():
+            try:
+                ts = _json.loads(cap_path.read_text(encoding="utf-8")).get("timestamp")
+            except Exception:
+                ts = None
+    if not ts:
+        ts = timestamp()
+
+    clips = inbox_clips(client)
+    if clips:
+        dest_dir = drive_path(client, "done", "Videos", f"Video_{ts}")
+        print(f"  finalize: moving {len(clips)} raw clip(s) -> {dest_dir}")
+        for fname in clips:
+            src = drive_path(client) + f"/{fname}"
+            dst = f"{dest_dir}/{fname}"
+            run(["rclone", "moveto", src, dst])
+    else:
+        print("  finalize: no inbox clips to move (already archived?).")
+
+    thumbs = inbox_thumbnails(client)
+    if thumbs:
+        if len(thumbs) > 1:
+            print(f"  finalize: multiple thumbnails {thumbs}; using '{thumbs[0]}'")
+        src_name = thumbs[0]
+        thumb_dest = drive_path(client, "done", "Thumbnails", f"Thumbnail_{ts}.png")
+        print(f"  finalize: moving thumbnail '{src_name}' -> {thumb_dest}")
+        run(["rclone", "moveto", drive_path(client) + f"/{src_name}", thumb_dest])
+
+    print(f"  finalize: done. Source set archived under Video_{ts}.")
+    return ts
+
+
+def archive(client):
+    """Backward-compatible: full archive = preview + finalize in one go.
+
+    Kept so any old call site still works. The new flow calls preview() at
+    delivery and finalize() on approval instead.
+    """
+    ts = preview(client)
+    finalize(client, ts)
+    return ts
+
+
 def main():
     ap = argparse.ArgumentParser(description="Google Drive sync for the reel pipeline")
-    ap.add_argument("op", choices=["fetch", "archive", "list"])
+    ap.add_argument("op", choices=["fetch", "preview", "finalize", "archive", "list"])
     ap.add_argument("client", nargs="?", help="client/project folder name on Drive")
     a = ap.parse_args()
 
@@ -502,6 +629,10 @@ def main():
 
     if a.op == "fetch":
         fetch(a.client)
+    elif a.op == "preview":
+        preview(a.client)
+    elif a.op == "finalize":
+        finalize(a.client)
     elif a.op == "archive":
         archive(a.client)
 
